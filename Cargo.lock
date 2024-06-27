@@ -3,5 +3,20 @@
 version = 3
 
 [[package]]
+name = "algorithms"
+version = "0.1.0"
+source = "git+https://github.com/SuperioOne/algorithms.git#791f67f7cafb3ab21c33b5fe6cf9c1ef50a64458"
+
+[[package]]
 name = "challange_1brc"
 version = "0.1.0"
+dependencies = [
+ "algorithms",
+ "libc",
+]
+
+[[package]]
+name = "libc"
+version = "0.2.155"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97b3888a4aecf77e811145cadf6eef5901f4782c53886191b2f693f24761847c"
