@@ -5,8 +5,15 @@ edition = "2021"
 
 [profile.release]
 lto = true
-strip = "none"
+codegen-units = 2
+
+[[bench]]
+name = "split"
+harness = false
 
 [dependencies]
 libc = {version = "0.2.155"}
 algorithms = { git = "https://github.com/SuperioOne/algorithms.git" } 
+
+[dev-dependencies]
+criterion = { version = "0.5.1" }
