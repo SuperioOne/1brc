@@ -70,7 +70,7 @@ impl From<std::io::Error> for BrcErrors {
 
 #[derive(Debug)]
 struct StationData {
-    name: Box<str>,
+    name: Box<[u8]>,
     min: f64,
     max: f64,
     count: f64,
@@ -211,7 +211,7 @@ impl<'a> Iterator for ChunkedLinesIter<'a> {
 /// Another possible optimization is using AVX-512 but I don't have hardware with AVX-512 support to test it.
 #[derive(Debug)]
 pub struct AvxLineIterator<'a> {
-    inner: &'a str,
+    inner: &'a [u8],
     line_map: u64,
     read: usize,
     head: usize,
@@ -219,7 +219,7 @@ pub struct AvxLineIterator<'a> {
 }
 
 impl<'a> AvxLineIterator<'a> {
-    pub fn new(text: &'a str) -> Self {
+    pub fn new(text: &'a [u8]) -> Self {
         Self {
             line_map: 0,
             map_offset: 0,
@@ -239,15 +239,18 @@ impl<'a> AvxLineIterator<'a> {
 
         while offset < len {
             // reads 64-byte (cacheline size for most cpus) data per iteration
-            let ptr0 = unsafe { addr.byte_add(offset).cast() };
-            let ptr1 = unsafe { addr.byte_add(offset + 32).cast() };
-            let block0 = unsafe { _mm256_loadu_si256(ptr0) };
-            let block1 = unsafe { _mm256_loadu_si256(ptr1) };
-            let cmp0 = unsafe { _mm256_cmpeq_epi8(block0, mask) };
-            let cmp1 = unsafe { _mm256_cmpeq_epi8(block1, mask) };
-            let pos_l = unsafe { _mm256_movemask_epi8(cmp0) } as u32;
-            let pos_h = unsafe { _mm256_movemask_epi8(cmp1) } as u32;
-            let line_map = ((pos_h as u64) << 32) | pos_l as u64; // bitmap for LF positions.
+            //
+            let line_map = unsafe {
+                let ptr0 = addr.byte_add(offset).cast();
+                let ptr1 = addr.byte_add(offset + 32).cast();
+                let block0 = _mm256_loadu_si256(ptr0);
+                let block1 = _mm256_loadu_si256(ptr1);
+                let cmp0 = _mm256_cmpeq_epi8(block0, mask);
+                let cmp1 = _mm256_cmpeq_epi8(block1, mask);
+                let pos_l = _mm256_movemask_epi8(cmp0) as u32;
+                let pos_h = _mm256_movemask_epi8(cmp1) as u32;
+                ((pos_h as u64) << 32) | pos_l as u64
+            };
 
             self.map_offset = offset;
             offset += 64;
@@ -261,7 +264,7 @@ impl<'a> AvxLineIterator<'a> {
 
         if offset >= len && tail_len > 0 {
             let mut line_map: u64 = 0;
-            let tail = self.inner[offset..].as_bytes();
+            let tail = &self.inner[offset..];
 
             for (idx, val) in tail.iter().enumerate() {
                 if *val == b'\n' {
@@ -277,7 +280,7 @@ impl<'a> AvxLineIterator<'a> {
 }
 
 impl<'a> Iterator for AvxLineIterator<'a> {
-    type Item = &'a str;
+    type Item = &'a [u8];
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
@@ -372,15 +375,17 @@ pub fn find_index(input: &[u8], char: u8) -> Option<usize> {
             let mut offset: usize = 0;
 
             while offset < len {
-                let ptr0 = unsafe { addr.byte_add(offset).cast() };
-                let ptr1 = unsafe { addr.byte_add(offset + 32).cast() };
-                let block0 = unsafe { _mm256_loadu_si256(ptr0) };
-                let block1 = unsafe { _mm256_loadu_si256(ptr1) };
-                let cmp0 = unsafe { _mm256_cmpeq_epi8(block0, mask) };
-                let cmp1 = unsafe { _mm256_cmpeq_epi8(block1, mask) };
-                let pos_l = unsafe { _mm256_movemask_epi8(cmp0) } as u32;
-                let pos_h = unsafe { _mm256_movemask_epi8(cmp1) } as u32;
-                let search_map = ((pos_h as u64) << 32) | pos_l as u64;
+                let search_map = unsafe {
+                    let ptr0 = addr.byte_add(offset).cast();
+                    let ptr1 = addr.byte_add(offset + 32).cast();
+                    let block0 = _mm256_loadu_si256(ptr0);
+                    let block1 = _mm256_loadu_si256(ptr1);
+                    let cmp0 = _mm256_cmpeq_epi8(block0, mask);
+                    let cmp1 = _mm256_cmpeq_epi8(block1, mask);
+                    let pos_l = _mm256_movemask_epi8(cmp0) as u32;
+                    let pos_h = _mm256_movemask_epi8(cmp1) as u32;
+                    ((pos_h as u64) << 32) | pos_l as u64
+                };
 
                 if search_map > 0 {
                     let bit_pos = search_map.trailing_zeros() as usize;
@@ -409,14 +414,52 @@ pub fn find_index(input: &[u8], char: u8) -> Option<usize> {
 type StationHashMap = HashMap<HashKey, StationData, City64HasherBuilder>;
 type HashKey = u128;
 
+/// Converts UTF-8 number character to binary number value without any check.
+macro_rules! parse_number {
+    ($v:expr) => {
+        $v - 48
+    };
+}
+
+// Parses float values between -99.9 to 99.9
+#[inline]
+fn parse_f64(value: &[u8]) -> Result<f64, BrcErrors> {
+    match value {
+        [b'-', h1, h0, b'.', l] => {
+            let nh1 = parse_number!(h1) * 10;
+            let nh0 = parse_number!(h0);
+            let nl = parse_number!(l) as f64 * 0.1;
+
+            Ok(-((nh1 + nh0) as f64 + nl))
+        }
+        [b'-', h0, b'.', l] => {
+            let nh0 = parse_number!(h0);
+            let nl = parse_number!(l) as f64 * 0.1;
+
+            Ok(-(nh0 as f64 + nl))
+        }
+        [h1, h0, b'.', l] => {
+            let nh1 = parse_number!(h1) * 10;
+            let nh0 = parse_number!(h0);
+            let nl = parse_number!(l) as f64 * 0.1;
+
+            Ok((nh1 + nh0) as f64 + nl)
+        }
+        [h0, b'.', l] => {
+            let nh0 = parse_number!(h0);
+            let nl = parse_number!(l) as f64 * 0.1;
+
+            Ok(nh0 as f64 + nl)
+        }
+        _ => unreachable!(),
+    }
+}
+
 /// Truncates station names into u128 (16-byte) value with Big-Endian format. This version assumes
 /// first 16 characters of station names are always unique.
 ///
-/// Why 16 characters and not 8?
-/// - Because of the Australian cities! See: Melbourne (Florida) and Melbourne (Australia)
-///
 /// Why Big-Endian?
-/// - On little-endian systems first char reads as least significant bits which makes ordering with
+/// On little-endian systems first char reads as least significant bits which makes ordering with
 /// std::collection::BTree problematic. For example; when we read "Melbourne" from memory as u128,
 /// we endup with "enruobleM" as value. Applying bswap instruction fixes the ordering in a very cheap way.
 #[inline]
@@ -453,25 +496,37 @@ fn main() -> Result<(), BrcErrors> {
             Vec::with_capacity(worker_count.into());
 
         for chunk in ChunkedLinesIter::from(mmap_bytes).chunk_by(chunk_size) {
-            // In the name of Utf-8 encoded input file we trust.
-            let chunk_str: &str = { unsafe { from_utf8_unchecked(chunk) } };
             let handle = s.spawn(|| {
                 let mut store: StationHashMap =
                     StationHashMap::with_capacity_and_hasher(512, City64HasherBuilder::default());
 
-                for line in AvxLineIterator::new(chunk_str) {
-                    let mut split_pos: usize = 0;
+                for line in AvxLineIterator::new(chunk) {
+                    // There are very limited cases for ';' position.
+                    // For;
+                    //      C char
+                    //      N number
+                    //
+                    // 6 5 4 3 2 1    -> Line last position indexes
+                    // ------------
+                    // C ; N N . N
+                    // C ; - N . N
+                    // C C ; N . N
+                    // ; - N N . N
+                    //
+                    // So far,';' can only appear at position 6, 5 and 4. We simply check these
+                    // position patterns which approximately takes 10 instruction and single
+                    // branching.
+                    let split_pos =
+                        match unsafe { line.get_unchecked((line.len() - 6)..(line.len() - 3)) } {
+                            [b';', ..] => line.len() - 6,
+                            [_, b';', ..] => line.len() - 5,
+                            [_, _, b';', ..] => line.len() - 4,
+                            _ => unreachable!(),
+                        };
 
-                    for (idx, char) in line.as_bytes().iter().enumerate().rev() {
-                        if *char == b';' {
-                            split_pos = idx;
-                            break;
-                        }
-                    }
-
-                    if let Ok(s_val) = (&line[(split_pos + 1)..line.len()]).parse::<f64>() {
+                    if let Ok(s_val) = parse_f64(&line[(split_pos + 1)..line.len()]) {
                         let s_name = &line[0..split_pos];
-                        let key = get_key(s_name.as_bytes());
+                        let key = get_key(s_name);
 
                         match store.get_mut(&key) {
                             Some(entry) => {
@@ -529,22 +584,18 @@ fn main() -> Result<(), BrcErrors> {
     _ = stdout_writer.write(b"{")?;
 
     for (idx, (_, value)) in merge_btree.into_iter().enumerate() {
+        stdout_writer.write_fmt(format_args!(
+            "{}={:.1}/{:.1}/{:.1}",
+            unsafe { from_utf8_unchecked(&value.name) },
+            value.min,
+            value.total / value.count,
+            value.max,
+        ))?;
+
         if idx == last_idx {
-            stdout_writer.write_fmt(format_args!(
-                "{}={:.1}/{:.1}/{:.1}}}",
-                value.name,
-                value.min,
-                value.total / value.count,
-                value.max,
-            ))?;
+            stdout_writer.write(b"}")?;
         } else {
-            stdout_writer.write_fmt(format_args!(
-                "{}={:.1}/{:.1}/{:.1}, ",
-                value.name,
-                value.min,
-                value.total / value.count,
-                value.max,
-            ))?;
+            stdout_writer.write(b", ")?;
         }
     }
 
@@ -711,15 +762,15 @@ Kunming;9.0";
 
     #[test]
     fn avx_line_iterator() {
-        for (l1, l2) in AvxLineIterator::new(TEST_VALUES).zip(TEST_VALUES.lines()) {
-            assert_eq!(l1, l2);
+        for (l1, l2) in AvxLineIterator::new(TEST_VALUES.as_bytes()).zip(TEST_VALUES.lines()) {
+            assert_eq!(l1, l2.as_bytes());
         }
     }
 
     #[test]
     fn avx_line_iterator_example_input() {
-        for (l1, l2) in AvxLineIterator::new(EXAMPLE_INPUT).zip(EXAMPLE_INPUT.lines()) {
-            assert_eq!(l1, l2);
+        for (l1, l2) in AvxLineIterator::new(EXAMPLE_INPUT.as_bytes()).zip(EXAMPLE_INPUT.lines()) {
+            assert_eq!(l1, l2.as_bytes());
         }
     }
 }
