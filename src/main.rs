@@ -148,8 +148,8 @@ impl Drop for MmapInner {
     }
 }
 
-/// Splits a slice into chunks with respecting LF characters. It does not gurantees each chunk size
-/// is exactly same since it looks for nearest LF from chunk offset.
+/// Splits a slice into multiple chunks with considiration of LF positions.
+/// It does not gurantees equal chunk sizes since it looks for nearest LF from chunk offset.
 pub struct ChunkedLinesIter<'a> {
     bytes: &'a [u8],
     pos: usize,
@@ -239,7 +239,6 @@ impl<'a> AvxLineIterator<'a> {
 
         while offset < len {
             // reads 64-byte (cacheline size for most cpus) data per iteration
-            //
             let line_map = unsafe {
                 let ptr0 = addr.byte_add(offset).cast();
                 let ptr1 = addr.byte_add(offset + 32).cast();
@@ -358,7 +357,7 @@ fn find_index_8_to_63(input: &[u8], char: u8) -> Option<usize> {
 
 // Returns first occurance of a byte.
 //
-// Algoritm is:
+// Algorithm details:
 // 0-7 bytes len -> linear search
 // 8-63 bytes len -> SWAR string match
 // 64-.. bytes len -> AVX matching
@@ -423,33 +422,33 @@ macro_rules! parse_number {
 
 // Parses float values between -99.9 to 99.9
 #[inline]
-fn parse_f64(value: &[u8]) -> Result<f64, BrcErrors> {
+fn parse_f64(value: &[u8]) -> f64 {
     match value {
         [b'-', h1, h0, b'.', l] => {
             let nh1 = parse_number!(h1) * 10;
             let nh0 = parse_number!(h0);
             let nl = parse_number!(l) as f64 * 0.1;
 
-            Ok(-((nh1 + nh0) as f64 + nl))
+            -((nh1 + nh0) as f64 + nl)
         }
         [b'-', h0, b'.', l] => {
             let nh0 = parse_number!(h0);
             let nl = parse_number!(l) as f64 * 0.1;
 
-            Ok(-(nh0 as f64 + nl))
+            -(nh0 as f64 + nl)
         }
         [h1, h0, b'.', l] => {
             let nh1 = parse_number!(h1) * 10;
             let nh0 = parse_number!(h0);
             let nl = parse_number!(l) as f64 * 0.1;
 
-            Ok((nh1 + nh0) as f64 + nl)
+            (nh1 + nh0) as f64 + nl
         }
         [h0, b'.', l] => {
             let nh0 = parse_number!(h0);
             let nl = parse_number!(l) as f64 * 0.1;
 
-            Ok(nh0 as f64 + nl)
+            nh0 as f64 + nl
         }
         _ => unreachable!(),
     }
@@ -524,29 +523,28 @@ fn main() -> Result<(), BrcErrors> {
                             _ => unreachable!(),
                         };
 
-                    if let Ok(s_val) = parse_f64(&line[(split_pos + 1)..line.len()]) {
-                        let s_name = &line[0..split_pos];
-                        let key = get_key(s_name);
+                    let s_val = parse_f64(&line[(split_pos + 1)..line.len()]);
+                    let s_name = &line[0..split_pos];
+                    let key = get_key(s_name);
 
-                        match store.get_mut(&key) {
-                            Some(entry) => {
-                                entry.min = entry.min.min(s_val);
-                                entry.max = entry.max.max(s_val);
-                                entry.total += s_val;
-                                entry.count += 1.0;
-                            }
-                            None => {
-                                _ = store.insert(
-                                    key,
-                                    StationData {
-                                        name: Box::from(s_name),
-                                        min: s_val,
-                                        max: s_val,
-                                        count: 1.0,
-                                        total: s_val,
-                                    },
-                                );
-                            }
+                    match store.get_mut(&key) {
+                        Some(entry) => {
+                            entry.min = entry.min.min(s_val);
+                            entry.max = entry.max.max(s_val);
+                            entry.total += s_val;
+                            entry.count += 1.0;
+                        }
+                        None => {
+                            _ = store.insert(
+                                key,
+                                StationData {
+                                    name: Box::from(s_name),
+                                    min: s_val,
+                                    max: s_val,
+                                    count: 1.0,
+                                    total: s_val,
+                                },
+                            );
                         }
                     }
                 }
