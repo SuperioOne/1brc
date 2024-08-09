@@ -1,10 +1,7 @@
-use algorithms::hash::cityhash::hash_fn::cityhash_64_with_seed;
+use algorithms::{buffer_utils::FastBufferUtils, hash::cityhash::hash_fn::cityhash_64_with_seed};
 use core::slice;
 use libc::{c_void, mmap64, munmap, MAP_FAILED, MAP_PRIVATE, PROT_READ};
 use std::{
-    arch::x86_64::{
-        __m256i, _mm256_cmpeq_epi8, _mm256_loadu_si256, _mm256_movemask_epi8, _mm256_set1_epi8,
-    },
     collections::{BTreeMap, HashMap},
     env::args,
     fs::File,
@@ -192,7 +189,7 @@ impl<'a> Iterator for ChunkedLinesIter<'a> {
             // End position could be middle of the row. We simply look ahead to find nearest LF (0x0A) before slicing.
             let look_ahead_chunk = &self.bytes[end..];
 
-            if let Some(lf_idx) = find_index(look_ahead_chunk, b'\n') {
+            if let Some(lf_idx) = look_ahead_chunk.fast_find(b'\n') {
                 let chunk_end = end + lf_idx;
 
                 self.pos = chunk_end + 1;
@@ -200,211 +197,6 @@ impl<'a> Iterator for ChunkedLinesIter<'a> {
             } else {
                 self.pos = self.bytes.len();
                 Some(&self.bytes[start..])
-            }
-        }
-    }
-}
-
-/// Custom line iterator, augmented with AVX2 instructions. This iterator processes 64-byte in a single
-/// iteration. It keeps an internal bitmap (8-byte) to track upcoming LF locations.
-///
-/// Another possible optimization is using AVX-512 but I don't have hardware with AVX-512 support to test it.
-#[derive(Debug)]
-pub struct AvxLineIterator<'a> {
-    inner: &'a [u8],
-    line_map: u64,
-    read: usize,
-    head: usize,
-    map_offset: usize,
-}
-
-impl<'a> AvxLineIterator<'a> {
-    pub fn new(text: &'a [u8]) -> Self {
-        Self {
-            line_map: 0,
-            map_offset: 0,
-            read: 0,
-            head: 0,
-            inner: text,
-        }
-    }
-
-    #[inline]
-    fn search_next(&mut self) {
-        let mask = unsafe { _mm256_set1_epi8(b'\n' as i8) };
-        let addr = self.inner.as_ptr();
-        let tail_len = self.inner.len() & 63;
-        let len = self.inner.len() - tail_len;
-        let mut offset = self.read;
-
-        while offset < len {
-            // reads 64-byte (cacheline size for most cpus) data per iteration
-            let line_map = unsafe {
-                let ptr0 = addr.byte_add(offset).cast();
-                let ptr1 = addr.byte_add(offset + 32).cast();
-                let block0 = _mm256_loadu_si256(ptr0);
-                let block1 = _mm256_loadu_si256(ptr1);
-                let cmp0 = _mm256_cmpeq_epi8(block0, mask);
-                let cmp1 = _mm256_cmpeq_epi8(block1, mask);
-                let pos_l = _mm256_movemask_epi8(cmp0) as u32;
-                let pos_h = _mm256_movemask_epi8(cmp1) as u32;
-                ((pos_h as u64) << 32) | pos_l as u64
-            };
-
-            self.map_offset = offset;
-            offset += 64;
-            self.read = offset;
-
-            if line_map > 0 {
-                self.line_map = line_map;
-                return;
-            }
-        }
-
-        if offset >= len && tail_len > 0 {
-            let mut line_map: u64 = 0;
-            let tail = &self.inner[offset..];
-
-            for (idx, val) in tail.iter().enumerate() {
-                if *val == b'\n' {
-                    line_map |= 0x1 << idx;
-                }
-            }
-
-            self.map_offset = offset;
-            self.line_map = line_map;
-            self.read += tail_len;
-        }
-    }
-}
-
-impl<'a> Iterator for AvxLineIterator<'a> {
-    type Item = &'a [u8];
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.head == self.inner.len() {
-            return None;
-        }
-
-        // bitmap is empty and read is not done.
-        if self.line_map == 0 && self.read < self.inner.len() {
-            self.search_next();
-        }
-
-        if self.line_map > 0 {
-            let head = self.head;
-            let bit_pos = self.line_map.trailing_zeros();
-            let line_end: usize = self.map_offset + (bit_pos as usize);
-
-            self.map_offset = line_end + 1;
-            self.head = line_end + 1;
-            self.line_map = self.line_map.wrapping_shr(bit_pos + 1);
-
-            Some(&self.inner[head..line_end])
-        } else if self.head < self.inner.len() && self.read == self.inner.len() {
-            let head = self.head;
-            self.head = self.inner.len();
-            Some(&self.inner[head..])
-        } else {
-            None
-        }
-    }
-}
-
-#[inline]
-fn find_index_0_to_7(input: &[u8], char: u8) -> Option<usize> {
-    for (idx, value) in input.iter().enumerate() {
-        if *value == char {
-            return Some(idx);
-        }
-    }
-
-    None
-}
-
-const SWAR_MASK_L: u64 = 0x7f7f7f7f7f7f7f7f;
-const SWAR_MASK_H: u64 = 0x8080808080808080;
-const SWAR_ADD: u64 = 0x0101010101010101;
-
-#[inline]
-fn find_index_8_to_63(input: &[u8], char: u8) -> Option<usize> {
-    let search = u64::from_ne_bytes([char; 8]);
-    let tail_len = input.len() & 7;
-    let len = input.len() - tail_len;
-    let addr: *const u64 = input.as_ptr().cast();
-    let mut offset = 0;
-
-    while offset < len {
-        let block: u64 = unsafe { addr.byte_add(offset).read() };
-        let eq = block ^ search;
-        let cmp = (!eq & SWAR_MASK_L).wrapping_add(SWAR_ADD) & (!eq & SWAR_MASK_H);
-
-        if cmp > 0 {
-            return Some(offset + (cmp.trailing_zeros() / 8) as usize);
-        }
-
-        offset += 8;
-    }
-
-    if tail_len > 0 {
-        let tail = &input[offset..];
-        find_index_0_to_7(tail, char).map(|v| v + offset)
-    } else {
-        None
-    }
-}
-
-// Returns first occurance of a byte.
-//
-// Algorithm details:
-// 0-7 bytes len -> linear search
-// 8-63 bytes len -> SWAR string match
-// 64-.. bytes len -> AVX matching
-#[inline]
-pub fn find_index(input: &[u8], char: u8) -> Option<usize> {
-    match input.len() {
-        0..=7 => find_index_0_to_7(input, char),
-        8..=63 => find_index_8_to_63(input, char),
-        _ => {
-            let mask: __m256i = unsafe { _mm256_set1_epi8(char as i8) };
-            let addr: *const u8 = input.as_ptr();
-            let tail_len = input.len() & 63;
-            let len = input.len() - tail_len;
-            let mut offset: usize = 0;
-
-            while offset < len {
-                let search_map = unsafe {
-                    let ptr0 = addr.byte_add(offset).cast();
-                    let ptr1 = addr.byte_add(offset + 32).cast();
-                    let block0 = _mm256_loadu_si256(ptr0);
-                    let block1 = _mm256_loadu_si256(ptr1);
-                    let cmp0 = _mm256_cmpeq_epi8(block0, mask);
-                    let cmp1 = _mm256_cmpeq_epi8(block1, mask);
-                    let pos_l = _mm256_movemask_epi8(cmp0) as u32;
-                    let pos_h = _mm256_movemask_epi8(cmp1) as u32;
-                    ((pos_h as u64) << 32) | pos_l as u64
-                };
-
-                if search_map > 0 {
-                    let bit_pos = search_map.trailing_zeros() as usize;
-                    return Some(offset + bit_pos);
-                }
-
-                offset += 64;
-            }
-
-            if tail_len > 0 {
-                let tail = &input[offset..];
-                let char_pos = match tail_len {
-                    0..=7 => find_index_0_to_7(tail, char),
-                    8..=63 => find_index_8_to_63(tail, char),
-                    _ => unreachable!(),
-                };
-
-                char_pos.map(|v| v + offset)
-            } else {
-                None
             }
         }
     }
@@ -499,7 +291,7 @@ fn main() -> Result<(), BrcErrors> {
                 let mut store: StationHashMap =
                     StationHashMap::with_capacity_and_hasher(512, City64HasherBuilder::default());
 
-                for line in AvxLineIterator::new(chunk) {
+                for line in chunk.fast_split_by_byte(b'\n') {
                     // There are very limited cases for ';' position.
                     // For;
                     //      C char
@@ -604,99 +396,7 @@ fn main() -> Result<(), BrcErrors> {
 
 #[cfg(test)]
 mod test {
-    use crate::{find_index, AvxLineIterator, ChunkedLinesIter};
-
-    const TEST_VALUES: &str = "sentence 1
-sentence 2
-sentence 3
-short
-shr
-kind of long sentence
-block2
-sentence 2
-sentence 3
-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-1
-2
-
-3
-4
-5
-hello world-";
-
-    const EXAMPLE_INPUT: &str = "
-Dallas;13.6
-Sacramento;33.9
-Austin;20.2
-Anchorage;-1.0
-Djibouti;24.5
-Pointe-Noire;19.3
-Gabès;5.0
-Guadalajara;29.2
-Kumasi;17.1
-Pyongyang;24.5
-Milwaukee;3.9
-Kunming;-1.9
-Zanzibar City;23.1
-Sana'a;10.3
-Belize City;31.3
-Belize City;41.8
-Chișinău;3.2
-Petropavlovsk-Kamchatsky;11.1
-Dhaka;32.5
-Brisbane;23.7
-Ho Chi Minh City;27.5
-Kolkata;20.4
-Jayapura;33.8
-Bulawayo;18.6
-Zanzibar City;27.7
-Baghdad;6.9
-Guangzhou;22.2
-Harare;-8.2
-Hamilton;24.8
-Dublin;12.5
-Dili;28.6
-Winnipeg;13.9
-Fukuoka;27.0
-Brazzaville;20.6
-Dakar;17.2
-Skopje;2.5
-Zagreb;18.6
-Sofia;-2.5
-Oslo;-7.8
-Oklahoma City;-1.8
-Cairns;12.6
-Da Lat;13.8
-Memphis;25.5
-Omaha;23.3
-Havana;16.0
-Tripoli;11.2
-Darwin;17.9
-El Paso;13.1
-Surabaya;15.2
-Kingston;12.2
-Tehran;10.4
-Reggane;39.9
-Reggane;45.0
-Surabaya;44.8
-Petropavlovsk-Kamchatsky;2.9
-Accra;29.7
-Muscat;23.6
-Oranjestad;22.4
-Mek'ele;23.5
-Kano;40.2
-Tamanrasset;15.5
-Maun;44.8
-Murmansk;3.2
-Karachi;32.1
-Ifrane;-2.6
-Tallinn;-2.8
-Aden;19.7
-Berlin;1.6
-Cabo San Lucas;18.7
-Tampa;26.6
-Kunming;9.0";
+    use crate::ChunkedLinesIter;
 
     #[test]
     fn chunk_test() {
@@ -718,57 +418,5 @@ Kunming;9.0";
 
         let forth = iterator.next().unwrap();
         assert_eq!(forth, &[1, b'\n', 1, b'\n', 3, 3, 3, b'\n']);
-    }
-
-    #[test]
-    fn find_test() {
-        assert_eq!(find_index("cfg=".as_bytes(), b'c'), Some(0));
-        assert_eq!(find_index("cfg=".as_bytes(), b'='), Some(3));
-        assert_eq!(find_index("cfg-example=mkf".as_bytes(), b'='), Some(11));
-        assert_eq!(find_index("cfg-example=mkf".as_bytes(), b'p'), Some(8));
-        assert_eq!(
-            find_index("cfg-example-longer-than-expected$=mkf".as_bytes(), b'$'),
-            Some(32)
-        );
-        assert_eq!(
-            find_index(TEST_VALUES.as_bytes(), b'5'),
-            TEST_VALUES.find('5')
-        );
-        assert_eq!(
-            find_index(TEST_VALUES.as_bytes(), b's'),
-            TEST_VALUES.find('s')
-        );
-        assert_eq!(find_index(TEST_VALUES.as_bytes(), b's'), Some(0));
-
-        assert_eq!(
-            find_index(TEST_VALUES.as_bytes(), b'\n'),
-            TEST_VALUES.find('\n')
-        );
-        assert_eq!(
-            find_index(TEST_VALUES.as_bytes(), b'k'),
-            TEST_VALUES.find('k')
-        );
-        assert_eq!(
-            find_index(TEST_VALUES.as_bytes(), b'f'),
-            TEST_VALUES.find('f')
-        );
-        assert_eq!(
-            find_index(TEST_VALUES.as_bytes(), b'-'),
-            TEST_VALUES.find('-')
-        );
-    }
-
-    #[test]
-    fn avx_line_iterator() {
-        for (l1, l2) in AvxLineIterator::new(TEST_VALUES.as_bytes()).zip(TEST_VALUES.lines()) {
-            assert_eq!(l1, l2.as_bytes());
-        }
-    }
-
-    #[test]
-    fn avx_line_iterator_example_input() {
-        for (l1, l2) in AvxLineIterator::new(EXAMPLE_INPUT.as_bytes()).zip(EXAMPLE_INPUT.lines()) {
-            assert_eq!(l1, l2.as_bytes());
-        }
     }
 }

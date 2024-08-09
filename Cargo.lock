@@ -5,7 +5,7 @@ version = 3
 [[package]]
 name = "algorithms"
 version = "0.1.0"
-source = "git+https://github.com/SuperioOne/algorithms.git#791f67f7cafb3ab21c33b5fe6cf9c1ef50a64458"
+source = "git+https://github.com/SuperioOne/algorithms.git#32122e97ea76667bb857939e1249d469a501287c"
 
 [[package]]
 name = "challange_1brc"
