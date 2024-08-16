@@ -1,4 +1,4 @@
-# 1 Billion Rows Challange - Rust
+# 1 Billion Rows Challenge - Rust
 
 ## What's new
 
@@ -21,7 +21,7 @@ RUSTFLAGS: "-O -Ctarget-cpu=x86-64-v3"
 
 Best case scenario - measurements.txt is already cached on memory.
 ```
- Performance counter stats for './target/release/challange_1brc ./measurements.txt' (20 runs):
+ Performance counter stats for './target/release/challenge_1brc ./measurements.txt' (20 runs):
 
         36,300,329      cache-misses                                                            ( +-  0.53% )  (83.23%)
     97,810,561,440      cycles                           #    4.452 GHz                         ( +-  0.05% )  (83.25%)
@@ -61,7 +61,7 @@ Best case scenario - measurements.txt is already cached on memory.
 
 Worst case scenario - Cold cache, nothing cached on memory.
 ```
- Performance counter stats for './target/release/challange_1brc ./measurements.txt':
+ Performance counter stats for './target/release/challenge_1brc ./measurements.txt':
 
        277,784,366      cache-misses                                                            (82.66%)
     83,212,123,901      cycles                           #    4.430 GHz                         (83.42%)
@@ -92,7 +92,7 @@ RUSTFLAGS: "-O -Ctarget-cpu=x86-64"
 
 Best case scenario - measurements.txt is already cached on memory.
 ```
- Performance counter stats for './target/release/challange_1brc ./measurements.txt' (20 runs):
+ Performance counter stats for './target/release/challenge_1brc ./measurements.txt' (20 runs):
 
         31,335,865      cache-misses                                                            ( +-  0.44% )  (83.26%)
    114,884,685,620      cycles                           #    4.446 GHz                         ( +-  0.06% )  (83.20%)
@@ -131,7 +131,7 @@ Best case scenario - measurements.txt is already cached on memory.
 
 Worst case scenario - Cold cache, nothing cached on memory.
 ```
- Performance counter stats for './target/release/challange_1brc ./measurements.txt':
+ Performance counter stats for './target/release/challenge_1brc ./measurements.txt':
 
        274,598,290      cache-misses                                                            (82.63%)
     98,389,092,251      cycles                           #    4.438 GHz                         (82.68%)
@@ -153,7 +153,7 @@ Worst case scenario - Cold cache, nothing cached on memory.
 1. Generate `measurements.txt`. See [https://github.com/gunnarmorling/1brc](https://github.com/gunnarmorling/1brc)
 2. Set `RUSTFLAGS` ENV variable to `-Ctarget-cpu=native`. Linux example; `export RUSTFLAGS="-Ctarget-cpu=native"`
 3. Run cargo release build by `cargo build --release`.
-4. Test it. `./target/release/challange_1brc <PATH_TO_MEASUREMENTS_FILE>`
+4. Test it. `./target/release/challenge_1brc <PATH_TO_MEASUREMENTS_FILE>`
 
 If you want to use Linux only `./perf_measure.sh` script to generate stats:
 
