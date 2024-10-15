@@ -3,15 +3,21 @@
 version = 3
 
 [[package]]
-name = "algorithms"
+name = "algorithms_buffer_utils"
 version = "0.1.0"
-source = "git+https://github.com/SuperioOne/algorithms.git#32122e97ea76667bb857939e1249d469a501287c"
+source = "git+https://github.com/SuperioOne/algorithms.git#301c7e9c7382e177c4b17164e4a7497d0f714889"
+
+[[package]]
+name = "algorithms_hash"
+version = "0.1.0"
+source = "git+https://github.com/SuperioOne/algorithms.git#301c7e9c7382e177c4b17164e4a7497d0f714889"
 
 [[package]]
 name = "challenge_1brc"
 version = "0.1.0"
 dependencies = [
- "algorithms",
+ "algorithms_buffer_utils",
+ "algorithms_hash",
  "libc",
 ]
 

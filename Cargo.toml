@@ -5,7 +5,10 @@ edition = "2021"
 
 [profile.release]
 lto = true
+panic = "abort"
+codegen-units = 1
 
 [dependencies]
 libc = {version = "0.2.155"}
-algorithms = { git = "https://github.com/SuperioOne/algorithms.git" } 
+algorithms_hash = { git = "https://github.com/SuperioOne/algorithms.git" }
+algorithms_buffer_utils = { git = "https://github.com/SuperioOne/algorithms.git" }
