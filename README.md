@@ -1,12 +1,5 @@
 # 1 Billion Rows Challenge - Rust
 
-## What's new
-
-I find the AVX2 line iterator pretty useful, and I decided to move it to my own [algorithms repo](https://github.com/SuperioOne/algorithms) for future uses.
-Also, it now has a fallback algorithm based on SWAR for other CPU architectures and older x86-64 CPUs.
-
-For previous inlined AVX2 only version, see [`avx2_only` tag](https://github.com/SuperioOne/1brc/tree/avx2_only)
-
 ## x86-64-v3 with AVX2 (0.95855 seconds)
 
 SIMD instructions, libc mmap, CityHash and Rust standard library.
@@ -78,7 +71,7 @@ Worst case scenario - Cold cache, nothing cached on memory.
        4.297025000 seconds sys
 ```
 
-## x86-64 without any SIMD tricks (1.07852)
+## x86-64 with SWAR (1.07852)
 
 libc mmap, CityHash and Rust standard library.
 

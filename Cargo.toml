@@ -1,7 +1,7 @@
 [package]
 name = "challenge_1brc"
-version = "0.1.0"
-edition = "2021"
+version = "0.1.1"
+edition = "2024"
 
 [profile.release]
 lto = true
@@ -9,6 +9,4 @@ panic = "abort"
 codegen-units = 1
 
 [dependencies]
-libc = {version = "0.2.155"}
-algorithms_hash = { git = "https://github.com/SuperioOne/algorithms.git" }
-algorithms_buffer_utils = { git = "https://github.com/SuperioOne/algorithms.git" }
+libc = { version = "0.2" }

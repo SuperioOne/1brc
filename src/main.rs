@@ -1,57 +1,21 @@
-use algorithms_buffer_utils::FastBufferUtils;
-use algorithms_hash::cityhash::hash_fn::cityhash_64_with_seed;
+use crate::{cityhash::City64HasherBuilder, find_byte::fast_find, split::FastSplitIterator};
 use core::slice;
-use libc::{c_void, mmap64, munmap, MAP_FAILED, MAP_PRIVATE, PROT_READ};
+use libc::{MAP_FAILED, MAP_PRIVATE, PROT_READ, c_void, mmap64, munmap};
 use std::{
     collections::{BTreeMap, HashMap},
     env::args,
     fs::File,
-    hash::{BuildHasher, Hasher},
     io::{BufWriter, Write},
     os::{fd::AsRawFd, unix::fs::MetadataExt},
     ptr::null_mut,
     str::from_utf8_unchecked,
     sync::Arc,
-    thread::{self, available_parallelism, JoinHandle},
+    thread::{self, JoinHandle, available_parallelism},
 };
 
-struct City64Hasher {
-    inner: u64,
-}
-struct City64HasherBuilder;
-
-impl Hasher for City64Hasher {
-    #[inline]
-    fn finish(&self) -> u64 {
-        self.inner
-    }
-
-    #[inline]
-    fn write(&mut self, bytes: &[u8]) {
-        let seed = self.inner;
-        self.inner = cityhash_64_with_seed(bytes, 0x9ae16a3b2f90404, seed);
-    }
-}
-
-impl Default for City64Hasher {
-    fn default() -> Self {
-        Self { inner: 0 }
-    }
-}
-
-impl BuildHasher for City64HasherBuilder {
-    type Hasher = City64Hasher;
-
-    fn build_hasher(&self) -> Self::Hasher {
-        City64Hasher::default()
-    }
-}
-
-impl Default for City64HasherBuilder {
-    fn default() -> Self {
-        Self
-    }
-}
+mod cityhash;
+mod find_byte;
+mod split;
 
 #[derive(Debug)]
 pub enum BrcErrors {
@@ -210,7 +174,7 @@ impl Iterator for ChunkedLinesIter<Arc<Mmap>> {
             // End position could be middle of the row. We simply look ahead to find nearest LF (0x0A) before slicing.
             let look_ahead_chunk = &self.inner.as_byte_slice()[end..];
 
-            if let Some(lf_idx) = look_ahead_chunk.fast_find(b'\n') {
+            if let Some(lf_idx) = fast_find(look_ahead_chunk, b'\n') {
                 let chunk_end = end + lf_idx;
 
                 self.pos = chunk_end + 1;
@@ -230,8 +194,7 @@ impl Iterator for ChunkedLinesIter<Arc<Mmap>> {
     }
 }
 
-type StationHashMap = HashMap<HashKey, StationData, City64HasherBuilder>;
-type HashKey = u128;
+type StationHashMap = HashMap<u128, StationData, City64HasherBuilder>;
 
 macro_rules! parse_number {
     ($v:expr) => {{
@@ -274,35 +237,36 @@ fn parse_f64(value: &[u8]) -> f64 {
 /// std::collection::BTree problematic. For example; when we read "Melbourne" from memory as u128,
 /// we endup with "enruobleM" as value. Applying bswap instruction fixes the ordering in a very cheap way.
 #[inline]
-fn get_key(input: &[u8]) -> HashKey {
-    let ptr: *const HashKey = input.as_ptr().cast();
-    let len = input.len();
+fn get_key(input: &[u8]) -> u128 {
+    let ptr: *const u128 = input.as_ptr().cast();
+    let mask = u128::MAX >> (16_usize.saturating_sub(input.len()) * 8);
+    let a = unsafe { ptr.read() } & mask;
 
-    match len {
-        0 => 0,
-        1..=15 => {
-            let mask = u128::MAX >> ((16 - len) * 8);
-            let a = unsafe { ptr.read() } & mask;
-            a.to_be()
-        }
-        _ => unsafe { ptr.read() }.to_be(),
-    }
+    a.to_be()
 }
 
-#[inline]
-fn process_file(mmap: Mmap, chunk_size: usize) -> Result<(), BrcErrors> {
+fn main() -> Result<(), BrcErrors> {
+    let worker_count = available_parallelism()?;
+    let fd = if let Some(file_path) = args().nth(1) {
+        let fd = std::fs::File::open(file_path)?;
+        Ok(fd)
+    } else {
+        Err(BrcErrors::InvalidPath)
+    }?;
+
+    let mmap = Mmap::new(fd)?;
+    let chunk_size: usize = mmap.len() / worker_count;
     let mmap_arc = Arc::new(mmap);
 
     let job_handles: Vec<JoinHandle<StationHashMap>> = ChunkedLinesIter::from(mmap_arc)
         .chunk_by(chunk_size)
-        .into_iter()
         .map(|slice| {
             thread::spawn(move || {
                 let chunk = slice.as_byte_slice();
                 let mut store: StationHashMap =
                     StationHashMap::with_capacity_and_hasher(512, City64HasherBuilder::default());
 
-                for line in chunk.fast_split_by_byte(b'\n') {
+                for line in FastSplitIterator::new(chunk, b'\n') {
                     // There are very limited cases for ';' position.
                     // For;
                     //      C char
@@ -359,7 +323,7 @@ fn process_file(mmap: Mmap, chunk_size: usize) -> Result<(), BrcErrors> {
         })
         .collect();
 
-    let mut merge_btree: BTreeMap<HashKey, StationData> = BTreeMap::new();
+    let mut merge_btree: BTreeMap<u128, StationData> = BTreeMap::new();
 
     for result_block in job_handles.into_iter().flat_map(|handle| handle.join()) {
         for (key, value) in result_block {
@@ -374,43 +338,28 @@ fn process_file(mmap: Mmap, chunk_size: usize) -> Result<(), BrcErrors> {
         }
     }
 
-    // let mut stdout_writer = BufWriter::new(std::io::stdout());
-    // let last_idx = merge_btree.len() - 1;
-    //
-    // _ = stdout_writer.write(b"{")?;
-    //
-    // for (idx, (_, value)) in merge_btree.into_iter().enumerate() {
-    //     stdout_writer.write_fmt(format_args!(
-    //         "{}={:.1}/{:.1}/{:.1}",
-    //         unsafe { from_utf8_unchecked(&value.name) },
-    //         value.min,
-    //         value.total / value.count,
-    //         value.max,
-    //     ))?;
-    //
-    //     if idx == last_idx {
-    //         stdout_writer.write(b"}")?;
-    //     } else {
-    //         stdout_writer.write(b", ")?;
-    //     }
-    // }
-    //
-    // stdout_writer.flush()?;
-    Ok(())
-}
+    let mut stdout_writer = BufWriter::new(std::io::stdout());
+    let last_idx = merge_btree.len() - 1;
 
-fn main() -> Result<(), BrcErrors> {
-    let worker_count = available_parallelism()?;
-    let fd = if let Some(file_path) = args().nth(1) {
-        let fd = std::fs::File::open(file_path)?;
-        Ok(fd)
-    } else {
-        Err(BrcErrors::InvalidPath)
-    }?;
+    _ = stdout_writer.write(b"{")?;
 
-    let mmap = Mmap::new(fd)?;
-    let chunk_size: usize = mmap.len() / worker_count;
-    process_file(mmap, chunk_size)?;
+    for (idx, (_, value)) in merge_btree.into_iter().enumerate() {
+        stdout_writer.write_fmt(format_args!(
+            "{}={:.1}/{:.1}/{:.1}",
+            unsafe { from_utf8_unchecked(&value.name) },
+            value.min,
+            value.total / value.count,
+            value.max,
+        ))?;
+
+        if idx == last_idx {
+            _ = stdout_writer.write(b"}")?;
+        } else {
+            _ = stdout_writer.write(b", ")?;
+        }
+    }
+
+    stdout_writer.flush()?;
 
     Ok(())
 }
